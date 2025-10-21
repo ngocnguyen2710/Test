@@ -17,6 +17,8 @@ public class Cell : MonoBehaviour
 
     public Cell NeighbourLeft { get; set; }
 
+    // origin cell reference: when an Item is moved to the extra row we keep its original cell here
+    public Cell OriginCell { get; set; }
 
     public bool IsEmpty => Item == null;
 
@@ -36,6 +38,8 @@ public class Cell : MonoBehaviour
     public void Free()
     {
         Item = null;
+        // clear origin reference when freeing
+        OriginCell = null;
     }
 
     public void Assign(Item item)
@@ -61,6 +65,7 @@ public class Cell : MonoBehaviour
             Item.Clear();
             Item = null;
         }
+        OriginCell = null;
     }
 
     internal bool IsSameType(Cell other)

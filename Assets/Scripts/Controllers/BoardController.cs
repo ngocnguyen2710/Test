@@ -49,7 +49,8 @@ public class BoardController : MonoBehaviour
     private void Fill()
     {
         m_board.Fill();
-        FindMatchesAndCollapse();
+        // Do not auto-collapse matches on initial fill to prevent unexpected initial removals
+        // FindMatchesAndCollapse();
     }
 
     private void OnGameStateChange(GameManager.eStateGame state)
@@ -64,7 +65,7 @@ public class BoardController : MonoBehaviour
                 break;
             case GameManager.eStateGame.GAME_OVER:
                 m_gameOver = true;
-                StopHints();
+                // StopHints();
                 break;
         }
     }
@@ -75,58 +76,84 @@ public class BoardController : MonoBehaviour
         if (m_gameOver) return;
         if (IsBusy) return;
 
-        if (!m_hintIsShown)
-        {
-            m_timeAfterFill += Time.deltaTime;
-            if (m_timeAfterFill > m_gameSettings.TimeForHint)
-            {
-                m_timeAfterFill = 0f;
-                ShowHint();
-            }
-        }
+        // if (!m_hintIsShown)
+        // {
+        //     m_timeAfterFill += Time.deltaTime;
+        //     if (m_timeAfterFill > m_gameSettings.TimeForHint)
+        //     {
+        //         m_timeAfterFill = 0f;
+        //         ShowHint();
+        //     }
+        // }
 
+        // Single-click interaction: move clicked item into extra row (no swapping)
         if (Input.GetMouseButtonDown(0))
         {
             var hit = Physics2D.Raycast(m_cam.ScreenToWorldPoint(Input.mousePosition), Vector2.zero);
             if (hit.collider != null)
             {
-                m_isDragging = true;
-                m_hitCollider = hit.collider;
-            }
-        }
-
-        if (Input.GetMouseButtonUp(0))
-        {
-            ResetRayCast();
-        }
-
-        if (Input.GetMouseButton(0) && m_isDragging)
-        {
-            var hit = Physics2D.Raycast(m_cam.ScreenToWorldPoint(Input.mousePosition), Vector2.zero);
-            if (hit.collider != null)
-            {
-                if (m_hitCollider != null && m_hitCollider != hit.collider)
+                Cell clicked = hit.collider.GetComponent<Cell>();
+                if (clicked != null)
                 {
-                    StopHints();
+                    // StopHints();
 
-                    Cell c1 = m_hitCollider.GetComponent<Cell>();
-                    Cell c2 = hit.collider.GetComponent<Cell>();
-                    if (AreItemsNeighbor(c1, c2))
+                    // Clicked on extra row
+                    if (clicked.BoardY == -1)
                     {
-                        IsBusy = true;
-                        SetSortingLayer(c1, c2);
-                        m_board.Swap(c1, c2, () =>
+                        if (m_gameManager != null && m_gameManager.CurrentLevelMode == GameManager.eLevelMode.MOVES)
                         {
-                            FindMatchesAndCollapse(c1, c2);
-                        });
+                            // MOVES mode: clicking extra row does nothing
+                        }
+                        else
+                        {
+                            // TIMER mode: try to return item to its origin cell
+                            bool returned = m_board.ReturnFromExtraRow(clicked);
+                            if (returned)
+                            {
+                                m_timeAfterFill = 0f;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // Clicked on main board cell: try move to extra row
+                        var res = m_board.TryMoveToExtraRow(clicked);
+                        if (res == Board.eExtraRowResult.ExtraFull)
+                        {
+                            // MOVES mode: extra full => game over
+                            if (m_gameManager != null && m_gameManager.CurrentLevelMode == GameManager.eLevelMode.MOVES)
+                            {
+                                m_gameManager.GameOver();
+                            }
+                            else
+                            {
+                                // TIMER mode: extra full does not cause game over
+                                m_timeAfterFill = 0f;
+                            }
+                        }
+                        else if (res == Board.eExtraRowResult.Moved)
+                        {
+                            // Moved successfully. Do NOT trigger OnMoveEvent for MOVES mode (we're "bỏ lượt").
+                            if (m_gameManager == null || m_gameManager.CurrentLevelMode != GameManager.eLevelMode.MOVES)
+                            {
+                                OnMoveEvent();
+                            }
 
-                        ResetRayCast();
+                            m_timeAfterFill = 0f;
+
+                            // If board is empty after this move, end the level
+                            if (m_board != null && m_board.IsEmpty() && m_gameManager != null)
+                            {
+                                m_gameManager.GameOver();
+                                return;
+                            }
+                        }
+                        else
+                        {
+                            // Failed: do nothing
+                        }
                     }
                 }
-            }
-            else
-            {
-                ResetRayCast();
             }
         }
     }
@@ -229,6 +256,13 @@ public class BoardController : MonoBehaviour
             m_board.ConvertNormalToBonus(matches, cellEnd);
         }
 
+        // If board is empty after explode => trigger game over
+        if (m_board != null && m_board.IsEmpty() && m_gameManager != null)
+        {
+            m_gameManager.GameOver();
+            return;
+        }
+
         StartCoroutine(ShiftDownItemsCoroutine());
     }
 
@@ -241,6 +275,13 @@ public class BoardController : MonoBehaviour
         m_board.FillGapsWithNewItems();
 
         yield return new WaitForSeconds(0.2f);
+
+        // if board became empty after fills/explodes -> game over
+        if (m_board != null && m_board.IsEmpty() && m_gameManager != null)
+        {
+            m_gameManager.GameOver();
+            yield break;
+        }
 
         FindMatchesAndCollapse();
     }
@@ -284,6 +325,17 @@ public class BoardController : MonoBehaviour
         m_board.Clear();
     }
 
+    // Helper wrappers for UI/GameManager queries
+    public bool IsBoardEmpty()
+    {
+        return m_board != null && m_board.IsEmpty();
+    }
+
+    public bool IsExtraRowFull()
+    {
+        return m_board != null && m_board.IsExtraRowFull();
+    }
+
     private void ShowHint()
     {
         m_hintIsShown = true;
@@ -303,4 +355,5 @@ public class BoardController : MonoBehaviour
 
         m_potentialMatch.Clear();
     }
+    
 }

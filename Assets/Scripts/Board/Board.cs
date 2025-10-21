@@ -24,6 +24,16 @@ public class Board
     private Transform m_root;
 
     private int m_matchMin;
+    
+    // extra row of cells under the main board (5 cells)
+    private List<Cell> m_extraRowCells = new List<Cell>();
+
+    public enum eExtraRowResult
+    {
+        Moved,
+        ExtraFull,
+        Failed
+    }
 
     public Board(Transform transform, GameSettings gameSettings)
     {
@@ -70,42 +80,150 @@ public class Board
             }
         }
 
+        //new cell
+        // We create 5 background cell instances positioned one row below the board (y = -1)
+        // and add them to m_extraRowCells so they can be managed/cleaned up like board cells.
+        int extraCount = 5;
+        for (int ex = 0; ex < extraCount; ex++)
+        {
+            GameObject go = GameObject.Instantiate(prefabBG);
+            // place them centered relative to the board origin; origin is at bottom-left offset
+            // so x from 0..extraCount-1 -> world x = origin.x + ex
+            go.transform.position = origin + new Vector3(ex -0.5f, -1.5f, 0f);
+            go.transform.SetParent(m_root);
+
+            Cell cell = go.GetComponent<Cell>();
+            // Use negative Y board coordinate for the extra row to avoid colliding with main board indices
+            cell.Setup(ex, -1);
+
+            m_extraRowCells.Add(cell);
+        }
+
     }
 
     internal void Fill()
     {
-        for (int x = 0; x < boardSizeX; x++)
+        // prepare pool size = main board cells ONLY (extra row remains empty initially)
+        int extraCount = m_extraRowCells.Count;
+        int mainCells = boardSizeX * boardSizeY;
+
+        // get normal types
+        var enumValues = Enum.GetValues(typeof(NormalItem.eNormalType)).Cast<NormalItem.eNormalType>().ToArray();
+
+        // build pool in triplets so each chosen type count % 3 == 0
+        List<NormalItem.eNormalType> pool = new List<NormalItem.eNormalType>();
+        System.Random rnd = new System.Random();
+        while (pool.Count < mainCells)
         {
-            for (int y = 0; y < boardSizeY; y++)
+            var t = enumValues[rnd.Next(enumValues.Length)];
+            pool.Add(t); pool.Add(t); pool.Add(t);
+        }
+        if (pool.Count > mainCells) pool = pool.Take(mainCells).ToList();
+        pool = pool.OrderBy(x => UnityEngine.Random.value).ToList();
+
+        // place items on main board ensuring no immediate 3-in-row is created
+        bool placedSuccessfully = false;
+        for (int attempt = 0; attempt < 10 && !placedSuccessfully; attempt++) // multiple attempts
+        {
+            placedSuccessfully = true;
+            // clear any existing items first
+            for (int x = 0; x < boardSizeX; x++)
+                for (int y = 0; y < boardSizeY; y++)
+                    m_cells[x, y].Free();
+
+            var localPool = pool.ToList();
+
+            for (int y = 0; y < boardSizeY && placedSuccessfully; y++)
             {
-                Cell cell = m_cells[x, y];
-                NormalItem item = new NormalItem();
-
-                List<NormalItem.eNormalType> types = new List<NormalItem.eNormalType>();
-                if (cell.NeighbourBottom != null)
+                for (int x = 0; x < boardSizeX; x++)
                 {
-                    NormalItem nitem = cell.NeighbourBottom.Item as NormalItem;
-                    if (nitem != null)
+                    bool placed = false;
+                    for (int i = 0; i < localPool.Count; i++)
                     {
-                        types.Add(nitem.ItemType);
+                        var candidate = localPool[i];
+                        bool createsMatch = false;
+                        // check horizontal (left two)
+                        if (x >= 2)
+                        {
+                            var left1 = m_cells[x - 1, y].Item as NormalItem;
+                            var left2 = m_cells[x - 2, y].Item as NormalItem;
+                            if (left1 != null && left2 != null && left1.ItemType == candidate && left2.ItemType == candidate)
+                            {
+                                createsMatch = true;
+                            }
+                        }
+                        // check vertical (down two)
+                        if (!createsMatch && y >= 2)
+                        {
+                            var down1 = m_cells[x, y - 1].Item as NormalItem;
+                            var down2 = m_cells[x, y - 2].Item as NormalItem;
+                            if (down1 != null && down2 != null && down1.ItemType == candidate && down2.ItemType == candidate)
+                            {
+                                createsMatch = true;
+                            }
+                        }
+
+                        if (createsMatch) continue;
+
+                        NormalItem item = new NormalItem();
+                        item.SetType(candidate);
+                        item.SetView();
+                        item.SetViewRoot(m_root);
+
+                        m_cells[x, y].Assign(item);
+                        m_cells[x, y].ApplyItemPosition(false);
+
+                        localPool.RemoveAt(i);
+                        placed = true;
+                        break;
+                    }
+
+                    if (!placed)
+                    {
+                        // failed this attempt
+                        placedSuccessfully = false;
+                        break;
                     }
                 }
+            }
 
-                if (cell.NeighbourLeft != null)
+            if (placedSuccessfully)
+            {
+                // ensure extra row is empty initially
+                for (int ex = 0; ex < extraCount; ex++)
                 {
-                    NormalItem nitem = cell.NeighbourLeft.Item as NormalItem;
-                    if (nitem != null)
-                    {
-                        types.Add(nitem.ItemType);
-                    }
+                    var cell = m_extraRowCells[ex];
+                    cell.Free();
                 }
+                break;
+            }
 
-                item.SetType(Utils.GetRandomNormalTypeExcept(types.ToArray()));
-                item.SetView();
-                item.SetViewRoot(m_root);
+            // reshuffle pool and retry
+            pool = pool.OrderBy(x => UnityEngine.Random.value).ToList();
+        }
 
-                cell.Assign(item);
-                cell.ApplyItemPosition(false);
+        // fallback: if placement still failed, fill naively from pool (main board) and keep extra row empty
+        if (!placedSuccessfully)
+        {
+            int idx = 0;
+            for (int x = 0; x < boardSizeX; x++)
+            {
+                for (int y = 0; y < boardSizeY; y++)
+                {
+                    Cell cell = m_cells[x, y];
+                    NormalItem item = new NormalItem();
+                    item.SetType(pool[idx++]);
+                    item.SetView();
+                    item.SetViewRoot(m_root);
+                    cell.Assign(item);
+                    cell.ApplyItemPosition(false);
+                }
+            }
+            // clear extra row
+            for (int ex = 0; ex < extraCount; ex++)
+            {
+                var cell = m_extraRowCells[ex];
+                cell.Free();
             }
         }
     }
@@ -155,6 +273,115 @@ public class Board
                 cell.ApplyItemPosition(true);
             }
         }
+    }
+
+    
+
+    // Try to move an item from a board cell into the first available extra-row cell.
+    // Returns true if the extra row is full after the move/processing (i.e. trigger game over),
+    // false otherwise or if move couldn't be performed.
+    internal eExtraRowResult TryMoveToExtraRow(Cell fromCell)
+    {
+        if (fromCell == null) return eExtraRowResult.Failed;
+        if (fromCell.IsEmpty) return eExtraRowResult.Failed;
+
+    // if fromCell is already in extra row, treat as failed
+    if (fromCell.BoardY == -1) return eExtraRowResult.Failed;
+
+        // find first empty extra cell
+        Cell target = m_extraRowCells.FirstOrDefault(c => c.IsEmpty);
+    if (target == null) return eExtraRowResult.ExtraFull;
+
+        Item item = fromCell.Item;
+        fromCell.Free();
+
+        target.Assign(item);
+        item.SetViewRoot(m_root);
+        // store origin cell reference on the extra cell
+        target.OriginCell = fromCell;
+
+        if (item.View != null)
+        {
+            item.View.DOMove(target.transform.position, 0.2f);
+        }
+        else
+        {
+            target.ApplyItemPosition(false);
+        }
+
+        // After placing, check extra row for groups of 3 (or multiples) of same type and remove them.
+        List<Cell> processed = new List<Cell>();
+        for (int i = 0; i < m_extraRowCells.Count; i++)
+        {
+            var baseCell = m_extraRowCells[i];
+            if (baseCell.IsEmpty) continue;
+            if (processed.Contains(baseCell)) continue;
+
+            // collect matching cells by IsSameType
+            List<Cell> matches = new List<Cell>();
+            for (int j = 0; j < m_extraRowCells.Count; j++)
+            {
+                var c = m_extraRowCells[j];
+                if (c.IsEmpty) continue;
+                if (c.Item.IsSameType(baseCell.Item))
+                {
+                    matches.Add(c);
+                }
+            }
+
+            if (matches.Count >= 3)
+            {
+                // remove groups of 3 until less than 3 remain
+                while (matches.Count >= 3)
+                {
+                    var toRemove = matches.Take(3).ToList();
+                    foreach (var rc in toRemove)
+                    {
+                        rc.ExplodeItem();
+                        processed.Add(rc);
+                        matches.Remove(rc);
+                    }
+                }
+            }
+            else
+            {
+                processed.AddRange(matches);
+            }
+        }
+
+        // If there is any empty cell in extra row after processing, game continues
+        bool anyEmpty = m_extraRowCells.Any(c => c.IsEmpty);
+
+        if (!anyEmpty) return eExtraRowResult.ExtraFull;
+        return eExtraRowResult.Moved;
+    }
+
+    // Return item from extra row back to its OriginCell if possible.
+    internal bool ReturnFromExtraRow(Cell extraCell)
+    {
+        if (extraCell == null) return false;
+        if (extraCell.BoardY != -1) return false;
+        if (extraCell.IsEmpty) return false;
+        if (extraCell.OriginCell == null) return false;
+
+        Cell origin = extraCell.OriginCell;
+        if (!origin.IsEmpty) return false;
+
+        Item item = extraCell.Item;
+        extraCell.Free();
+
+        origin.Assign(item);
+        item.SetViewRoot(m_root);
+        if (item.View != null)
+        {
+            item.View.DOMove(origin.transform.position, 0.2f);
+        }
+        else
+        {
+            origin.ApplyItemPosition(false);
+        }
+
+        return true;
     }
 
     internal void ExplodeAllItems()
@@ -673,5 +900,37 @@ public class Board
                 m_cells[x, y] = null;
             }
         }
+        // Destroy the extra row cells
+        foreach (var cell in m_extraRowCells)
+        {
+            GameObject.Destroy(cell.gameObject);
+        }
+        m_extraRowCells.Clear();
+    }
+
+    // Check whether both main board and extra row contain no items
+    internal bool IsEmpty()
+    {
+        for (int x = 0; x < boardSizeX; x++)
+        {
+            for (int y = 0; y < boardSizeY; y++)
+            {
+                if (!m_cells[x, y].IsEmpty) return false;
+            }
+        }
+
+        foreach (var c in m_extraRowCells)
+        {
+            if (!c.IsEmpty) return false;
+        }
+
+        return true;
+    }
+
+    // Returns true if the extra row is present and contains no empty cells
+    internal bool IsExtraRowFull()
+    {
+        if (m_extraRowCells == null || m_extraRowCells.Count == 0) return false;
+        return m_extraRowCells.All(c => !c.IsEmpty);
     }
 }
